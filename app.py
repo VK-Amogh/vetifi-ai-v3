@@ -4,6 +4,7 @@ import json
 import ssl
 import os
 import re
+import math
 from system_prompt import VETDX_SYSTEM_PROMPT
 
 # -----------------------------------------------------------------------------
@@ -97,9 +98,14 @@ env_openai_key = env_vars.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY",
 @st.cache_resource
 def load_local_data():
     docs = []
-    filename = 'qdrant_export.json'
-    if not os.path.exists(filename) and os.path.exists('qdrant_export-1.json'):
-        filename = 'qdrant_export-1.json'
+    # Dynamic database selection (preferring qdrant_export-2.json)
+    filename = 'qdrant_export-2.json'
+    if not os.path.exists(filename):
+        if os.path.exists('qdrant_export.json'):
+            filename = 'qdrant_export.json'
+        elif os.path.exists('qdrant_export-1.json'):
+            filename = 'qdrant_export-1.json'
+            
     try:
         with open(filename, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -120,29 +126,78 @@ def load_local_data():
     return docs
 
 # -----------------------------------------------------------------------------
-# Search Algorithms (Keyword vs Cosine Similarity Vector Search)
+# Search Algorithms (BM25 Engine vs Cosine Similarity Vector Search)
 # -----------------------------------------------------------------------------
-def search_local_keyword(query, docs, limit=5):
-    query_words = set(re.findall(r'\w+', query.lower()))
-    scored_docs = []
-    for doc in docs:
-        text_lower = doc['text'].lower()
-        score = sum(1 for word in query_words if word in text_lower)
-        if score > 0:
-            scored_docs.append((score, doc))
+class BM25SearchEngine:
+    def __init__(self, docs, k1=1.5, b=0.75):
+        self.k1 = k1
+        self.b = b
+        self.docs = docs
+        self.corpus_size = len(docs)
+        self.doc_freqs = []
+        self.doc_lengths = []
+        self.df = {}
+        self.idf = {}
+        
+        # Build vocabulary, freqs, and lengths
+        for doc in docs:
+            words = self.tokenize(doc['text'])
+            self.doc_lengths.append(len(words))
             
-    scored_docs.sort(key=lambda x: x[0], reverse=True)
-    results = []
-    for score, doc in scored_docs[:limit]:
-        results.append({
-            "score": float(score),
-            "score_type": "Keyword Match",
-            "payload": {
-                "text": doc["text"],
-                "metadata-page_number": doc["page"]
-            }
-        })
-    return results
+            freqs = {}
+            for w in words:
+                freqs[w] = freqs.get(w, 0) + 1
+            self.doc_freqs.append(freqs)
+            
+            for w in freqs:
+                self.df[w] = self.df.get(w, 0) + 1
+                
+        self.avg_doc_len = sum(self.doc_lengths) / self.corpus_size if self.corpus_size > 0 else 0
+        
+        # Compute IDF
+        for word, freq in self.df.items():
+            self.idf[word] = math.log((self.corpus_size - freq + 0.5) / (freq + 0.5) + 1.0)
+            
+    def tokenize(self, text):
+        return re.findall(r'\b\w+\b', text.lower())
+        
+    def search(self, query, limit=5):
+        query_words = self.tokenize(query)
+        scored_results = []
+        
+        for idx, doc in enumerate(self.docs):
+            score = 0.0
+            doc_len = self.doc_lengths[idx]
+            freqs = self.doc_freqs[idx]
+            
+            for word in query_words:
+                if word in self.idf:
+                    word_freq = freqs.get(word, 0)
+                    num = word_freq * (self.k1 + 1)
+                    den = word_freq + self.k1 * (1 - self.b + self.b * (doc_len / self.avg_doc_len))
+                    score += self.idf[word] * (num / den)
+                    
+            if score > 0:
+                scored_results.append((score, doc))
+                
+        # Sort by score descending
+        scored_results.sort(key=lambda x: x[0], reverse=True)
+        
+        results = []
+        for score, doc in scored_results[:limit]:
+            results.append({
+                "score": float(score),
+                "score_type": "BM25 Relevance",
+                "payload": {
+                    "text": doc["text"],
+                    "metadata-page_number": doc["page"]
+                }
+            })
+        return results
+
+@st.cache_resource
+def get_bm25_index(_docs):
+    return BM25SearchEngine(_docs)
 
 def dot_product(v1, v2):
     return sum(x * y for x, y in zip(v1, v2))
@@ -175,8 +230,9 @@ def get_openai_embedding(text, openai_key):
 def search_local_vector(query, docs, openai_key, limit=5):
     query_vector = get_openai_embedding(query, openai_key)
     if not query_vector:
-        st.warning("Failed to generate query embedding. Falling back to keyword search.")
-        return search_local_keyword(query, docs, limit)
+        st.warning("Failed to generate query embedding. Falling back to offline BM25 search.")
+        bm25_index = get_bm25_index(docs)
+        return bm25_index.search(query, limit)
         
     scored_docs = []
     for doc in docs:
@@ -262,7 +318,7 @@ with st.sidebar:
     if openai_key_input:
         st.success("🎯 Semantic Vector Search Active")
     else:
-        st.info("🔍 Keyword Search Active (Enter OpenAI Key for Semantic Vector Search)")
+        st.success("⚡ Offline BM25 Search Active (0 API Cost)")
         
     st.divider()
     st.metric(label="Current Follow-up Count", value=f"{st.session_state.followup_count} / 3")
@@ -276,8 +332,9 @@ with st.sidebar:
 st.title("🐾 Vetifi-Ai Clinical Decision Support")
 st.markdown("Provide the patient's presentation (signalment, history, PE findings). Vetifi-Ai will narrow down the diagnosis using the veterinary manual.")
 
-# Load docs once
+# Load docs and BM25 index once
 docs = load_local_data()
+bm25_index = get_bm25_index(docs)
 
 # Display chat history
 for message in st.session_state.messages:
@@ -286,7 +343,7 @@ for message in st.session_state.messages:
         if "sources" in message and message["sources"]:
             with st.expander("📄 Retrieved Context"):
                 for src in message["sources"]:
-                    score_txt = f"{src.get('score_type', 'Score')}: {src['score']:.4f}" if isinstance(src['score'], float) and src.get('score_type') != "Keyword Match" else f"{src.get('score_type', 'Score')}: {src['score']}"
+                    score_txt = f"{src.get('score_type', 'Score')}: {src['score']:.4f}" if isinstance(src['score'], float) and src.get('score_type') != "BM25 Relevance" else f"{src.get('score_type', 'Score')}: {src['score']:.2f}"
                     st.markdown(f'''
                     <div class="source-box">
                         <strong>Page {src['page']}</strong> ({score_txt})<br>
@@ -312,7 +369,7 @@ if prompt := st.chat_input("Enter clinical presentation or answer clarifying que
             if openai_key_input:
                 hits = search_local_vector(prompt, docs, openai_key_input, limit=5)
             else:
-                hits = search_local_keyword(prompt, docs, limit=5)
+                hits = bm25_index.search(prompt, limit=5)
             
         retrieved_chunks = []
         source_data = []
@@ -354,7 +411,7 @@ if prompt := st.chat_input("Enter clinical presentation or answer clarifying que
             if source_data:
                 with st.expander("📄 Retrieved Context"):
                     for src in source_data:
-                        score_txt = f"{src.get('score_type', 'Score')}: {src['score']:.4f}" if isinstance(src['score'], float) and src.get('score_type') != "Keyword Match" else f"{src.get('score_type', 'Score')}: {src['score']}"
+                        score_txt = f"{src.get('score_type', 'Score')}: {src['score']:.4f}" if isinstance(src['score'], float) and src.get('score_type') != "BM25 Relevance" else f"{src.get('score_type', 'Score')}: {src['score']:.2f}"
                         st.markdown(f'''
                         <div class="source-box">
                             <strong>Page {src['page']}</strong> ({score_txt})<br>
