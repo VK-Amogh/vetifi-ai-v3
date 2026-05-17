@@ -60,43 +60,136 @@ st.markdown("""
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # -----------------------------------------------------------------------------
-# Local Data Loading (No OpenAI Key Required)
+# Keys & Environment Persistence
+# -----------------------------------------------------------------------------
+def load_env_file():
+    env_vars = {}
+    if os.path.exists(".env"):
+        try:
+            with open(".env", "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        env_vars[k.strip()] = v.strip()
+        except Exception:
+            pass
+    return env_vars
+
+def save_env_file(key, val):
+    env_vars = load_env_file()
+    env_vars[key] = val
+    try:
+        with open(".env", "w", encoding="utf-8") as f:
+            for k, v in env_vars.items():
+                f.write(f"{k}={v}\n")
+    except Exception:
+        pass
+
+# Initialize persist keys
+env_vars = load_env_file()
+env_groq_key = env_vars.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
+env_openai_key = env_vars.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+
+# -----------------------------------------------------------------------------
+# Local Data Loading (Preserving Vectors for Semantic Search)
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def load_local_data():
     docs = []
+    filename = 'qdrant_export.json'
+    if not os.path.exists(filename) and os.path.exists('qdrant_export-1.json'):
+        filename = 'qdrant_export-1.json'
     try:
-        with open('qdrant_export.json', 'r', encoding='utf-8') as f:
+        with open(filename, 'r', encoding='utf-8') as f:
             data = json.load(f)
             for item in data:
                 payload = item.get('payload', {})
                 text = payload.get('text', '')
                 page = payload.get('metadata-page_number', 'Unknown')
+                vector = item.get('vector', None)
                 if text:
-                    docs.append({"text": text, "page": page})
+                    docs.append({
+                        "text": text,
+                        "page": page,
+                        "vector": vector,
+                        "payload": payload
+                    })
     except Exception as e:
-        st.error(f"Failed to load local database: {e}")
+        st.error(f"Failed to load local database ({filename}): {e}")
     return docs
 
-def search_local(query, docs, limit=5):
-    # Extremely basic keyword search
+# -----------------------------------------------------------------------------
+# Search Algorithms (Keyword vs Cosine Similarity Vector Search)
+# -----------------------------------------------------------------------------
+def search_local_keyword(query, docs, limit=5):
     query_words = set(re.findall(r'\w+', query.lower()))
-    
     scored_docs = []
     for doc in docs:
         text_lower = doc['text'].lower()
-        # Count how many query words appear in this chunk
         score = sum(1 for word in query_words if word in text_lower)
         if score > 0:
             scored_docs.append((score, doc))
             
-    # Sort by highest score first
     scored_docs.sort(key=lambda x: x[0], reverse=True)
-    
     results = []
     for score, doc in scored_docs[:limit]:
         results.append({
             "score": float(score),
+            "score_type": "Keyword Match",
+            "payload": {
+                "text": doc["text"],
+                "metadata-page_number": doc["page"]
+            }
+        })
+    return results
+
+def dot_product(v1, v2):
+    return sum(x * y for x, y in zip(v1, v2))
+
+def norm(v):
+    return sum(x * x for x in v) ** 0.5
+
+def cosine_similarity(v1, v2):
+    n1 = norm(v1)
+    n2 = norm(v2)
+    if n1 == 0 or n2 == 0:
+        return 0.0
+    return dot_product(v1, v2) / (n1 * n2)
+
+def get_openai_embedding(text, openai_key):
+    url = "https://api.openai.com/v1/embeddings"
+    headers = {
+        "Authorization": f"Bearer {openai_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "input": text,
+        "model": "text-embedding-3-large"
+    }
+    resp = make_post_request(url, headers, payload)
+    if resp and 'data' in resp:
+        return resp['data'][0]['embedding']
+    return None
+
+def search_local_vector(query, docs, openai_key, limit=5):
+    query_vector = get_openai_embedding(query, openai_key)
+    if not query_vector:
+        st.warning("Failed to generate query embedding. Falling back to keyword search.")
+        return search_local_keyword(query, docs, limit)
+        
+    scored_docs = []
+    for doc in docs:
+        if doc.get('vector'):
+            sim = cosine_similarity(query_vector, doc['vector'])
+            scored_docs.append((sim, doc))
+            
+    scored_docs.sort(key=lambda x: x[0], reverse=True)
+    results = []
+    for sim, doc in scored_docs[:limit]:
+        results.append({
+            "score": float(sim),
+            "score_type": "Cosine Similarity",
             "payload": {
                 "text": doc["text"],
                 "metadata-page_number": doc["page"]
@@ -151,13 +244,25 @@ if "conversation_history" not in st.session_state:
 
 with st.sidebar:
     st.header("⚙️ Settings & State")
-    st.info("Running locally using qdrant_export.json. No OpenAI API Key required.")
     
-    env_groq_key = os.environ.get("GROQ_API_KEY", "")
     groq_key_input = st.text_input("Groq API Key (Required)", value=env_groq_key, type="password")
+    if groq_key_input and groq_key_input != env_groq_key:
+        save_env_file("GROQ_API_KEY", groq_key_input)
+        st.success("Groq Key saved to .env!")
+        st.rerun()
+        
+    openai_key_input = st.text_input("OpenAI API Key (Optional for Semantic Vector Search)", value=env_openai_key, type="password")
+    if openai_key_input and openai_key_input != env_openai_key:
+        save_env_file("OPENAI_API_KEY", openai_key_input)
+        st.success("OpenAI Key saved to .env!")
+        st.rerun()
+        
+    st.divider()
     
-    if groq_key_input:
-        st.success("Groq API Key configured.")
+    if openai_key_input:
+        st.success("🎯 Semantic Vector Search Active")
+    else:
+        st.info("🔍 Keyword Search Active (Enter OpenAI Key for Semantic Vector Search)")
         
     st.divider()
     st.metric(label="Current Follow-up Count", value=f"{st.session_state.followup_count} / 3")
@@ -181,9 +286,10 @@ for message in st.session_state.messages:
         if "sources" in message and message["sources"]:
             with st.expander("📄 Retrieved Context"):
                 for src in message["sources"]:
+                    score_txt = f"{src.get('score_type', 'Score')}: {src['score']:.4f}" if isinstance(src['score'], float) and src.get('score_type') != "Keyword Match" else f"{src.get('score_type', 'Score')}: {src['score']}"
                     st.markdown(f'''
                     <div class="source-box">
-                        <strong>Page {src['page']}</strong> (Keyword Score: {src['score']})<br>
+                        <strong>Page {src['page']}</strong> ({score_txt})<br>
                         {src['text']}
                     </div>
                     ''', unsafe_allow_html=True)
@@ -203,13 +309,17 @@ if prompt := st.chat_input("Enter clinical presentation or answer clarifying que
         
     with st.chat_message("assistant"):
         with st.spinner("Searching local database for relevant chunks..."):
-            hits = search_local(prompt, docs, limit=5)
+            if openai_key_input:
+                hits = search_local_vector(prompt, docs, openai_key_input, limit=5)
+            else:
+                hits = search_local_keyword(prompt, docs, limit=5)
             
         retrieved_chunks = []
         source_data = []
         if hits:
             for hit in hits:
                 score = hit.get('score', 0)
+                score_type = hit.get('score_type', 'Score')
                 payload = hit.get('payload', {})
                 text = payload.get('text', '')
                 page_num = payload.get('metadata-page_number', None)
@@ -219,7 +329,12 @@ if prompt := st.chat_input("Enter clinical presentation or answer clarifying que
                     "source_page": page_num,
                     "similarity_score": score
                 })
-                source_data.append({"page": page_num, "text": text, "score": score})
+                source_data.append({
+                    "page": page_num,
+                    "text": text,
+                    "score": score,
+                    "score_type": score_type
+                })
         
         # Build strict JSON input
         user_payload_json = {
@@ -239,9 +354,10 @@ if prompt := st.chat_input("Enter clinical presentation or answer clarifying que
             if source_data:
                 with st.expander("📄 Retrieved Context"):
                     for src in source_data:
+                        score_txt = f"{src.get('score_type', 'Score')}: {src['score']:.4f}" if isinstance(src['score'], float) and src.get('score_type') != "Keyword Match" else f"{src.get('score_type', 'Score')}: {src['score']}"
                         st.markdown(f'''
                         <div class="source-box">
-                            <strong>Page {src['page']}</strong> (Keyword Score: {src['score']})<br>
+                            <strong>Page {src['page']}</strong> ({score_txt})<br>
                             {src['text']}
                         </div>
                         ''', unsafe_allow_html=True)
