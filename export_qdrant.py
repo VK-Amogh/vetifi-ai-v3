@@ -5,7 +5,7 @@ import time
 
 QDRANT_URL = "https://45de9526-9acf-44cf-919a-6ba8557d978d.australia-southeast1-0.gcp.cloud.qdrant.io:6333"
 QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIiwic3ViamVjdCI6ImFwaS1rZXk6MGYzMzVlYjEtMDAwZi00NmNiLThhZDYtMDBhNzE1NjczNGIyIn0.JoHi-ugk1JiPPja9E7AtkTVwB-rr5ZE9qV7-AqC3FNs"
-COLLECTION_NAME = "Collection-1"
+COLLECTION_NAME = "vetifi-v2"
 
 def make_post_request(url, headers, payload):
     data = json.dumps(payload).encode('utf-8')
