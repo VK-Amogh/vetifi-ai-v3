@@ -269,18 +269,41 @@ def make_post_request(url, headers, payload):
         st.error(f"API Error: {e}")
         return None
 
-def call_groq_llm(system_prompt, user_prompt_json, groq_api_key):
+def call_groq_llm(system_prompt, conversation_history, retrieved_chunks, groq_api_key):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {groq_api_key}",
         "Content-Type": "application/json"
     }
+    
+    # Construct the messages list
+    messages = [{"role": "system", "content": system_prompt}]
+    
+    # Add conversation history up to the second-to-last message
+    # (so we can append the retrieved chunks to the latest user message)
+    for msg in conversation_history[:-1]:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+        
+    # Append retrieved chunks to the latest user message
+    if conversation_history:
+        latest_msg = conversation_history[-1]
+        latest_content = latest_msg["content"]
+        
+        chunks_str = ""
+        if retrieved_chunks:
+            chunks_str += "\n\nRetrieved Passages from the Merck Veterinary Manual:\n"
+            for idx, c in enumerate(retrieved_chunks):
+                source = f"Page {c.get('source_page')}" if c.get('source_page') is not None else "Unknown page"
+                chunks_str += f"\n--- Passage {idx + 1} (Source: {source}, Relevance: {c.get('similarity_score', 0):.4f}) ---\n{c['text']}\n"
+        
+        messages.append({
+            "role": "user",
+            "content": f"{latest_content}{chunks_str}"
+        })
+    
     payload = {
         "model": GROQ_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": json.dumps(user_prompt_json)}
-        ],
+        "messages": messages,
         "temperature": 0.1
     }
     resp = make_post_request(url, headers, payload)
@@ -321,7 +344,7 @@ with st.sidebar:
         st.success("⚡ Offline BM25 Search Active (0 API Cost)")
         
     st.divider()
-    st.metric(label="Current Follow-up Count", value=f"{st.session_state.followup_count} / 3")
+    st.metric(label="Current Follow-up Count", value=f"{st.session_state.followup_count} / 6")
     
     if st.button("🔄 Start New Case", type="primary", use_container_width=True):
         st.session_state.messages = []
@@ -393,16 +416,13 @@ if prompt := st.chat_input("Enter clinical presentation or answer clarifying que
                     "score_type": score_type
                 })
         
-        # Build strict JSON input
-        user_payload_json = {
-            "clinical_input": prompt,
-            "retrieved_chunks": retrieved_chunks,
-            "conversation_history": st.session_state.conversation_history,
-            "followup_count": st.session_state.followup_count
-        }
-        
         with st.spinner("Analyzing differential and diagnostic path..."):
-            answer = call_groq_llm(VETDX_SYSTEM_PROMPT, user_payload_json, groq_key_input)
+            answer = call_groq_llm(
+                system_prompt=VETDX_SYSTEM_PROMPT,
+                conversation_history=st.session_state.conversation_history,
+                retrieved_chunks=retrieved_chunks,
+                groq_api_key=groq_key_input
+            )
             
         if answer:
             st.markdown(answer)
@@ -419,8 +439,9 @@ if prompt := st.chat_input("Enter clinical presentation or answer clarifying que
                         </div>
                         ''', unsafe_allow_html=True)
                         
-            # State Management: Check if it's a clarifying question
-            if "CLARIFYING QUESTION" in answer.upper():
+            # State Management: Check if it's a clarifying question or final diagnosis.
+            # If the response does not contain the final diagnosis heading, count it as a follow-up question.
+            if "MOST LIKELY DIAGNOSIS" not in answer.upper():
                 st.session_state.followup_count += 1
                 
             st.session_state.messages.append({
