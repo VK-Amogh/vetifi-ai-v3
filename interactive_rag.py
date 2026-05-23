@@ -2,11 +2,97 @@ import urllib.request
 import json
 import ssl
 import os
+import re
+import math
 
-# Qdrant configuration
-QDRANT_URL = "https://45de9526-9acf-44cf-919a-6ba8557d978d.australia-southeast1-0.gcp.cloud.qdrant.io:6333"
-QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIiwic3ViamVjdCI6ImFwaS1rZXk6MGYzMzVlYjEtMDAwZi00NmNiLThhZDYtMDBhNzE1NjczNGIyIn0.JoHi-ugk1JiPPja9E7AtkTVwB-rr5ZE9qV7-AqC3FNs"
-COLLECTION_NAME = "vetifi-v2"
+# -----------------------------------------------------------------------------
+# Local Data Loading & BM25 Search Engine (Purely Offline)
+# -----------------------------------------------------------------------------
+def load_local_data():
+    docs = []
+    filename = 'qdrant_export-2.json'
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            for item in data:
+                payload = item.get('payload', {})
+                text = payload.get('text', '')
+                page = payload.get('metadata-page_number', 'Unknown')
+                if text:
+                    docs.append({
+                        "text": text,
+                        "page": page
+                    })
+    except Exception as e:
+        print(f"Error loading local database ({filename}): {e}")
+    return docs
+
+class BM25SearchEngine:
+    def __init__(self, docs, k1=1.5, b=0.75):
+        self.k1 = k1
+        self.b = b
+        self.docs = docs
+        self.corpus_size = len(docs)
+        self.doc_freqs = []
+        self.doc_lengths = []
+        self.df = {}
+        self.idf = {}
+        
+        # Build vocabulary, freqs, and lengths
+        for doc in docs:
+            words = self.tokenize(doc['text'])
+            self.doc_lengths.append(len(words))
+            
+            freqs = {}
+            for w in words:
+                freqs[w] = freqs.get(w, 0) + 1
+            self.doc_freqs.append(freqs)
+            
+            for w in freqs:
+                self.df[w] = self.df.get(w, 0) + 1
+                
+        self.avg_doc_len = sum(self.doc_lengths) / self.corpus_size if self.corpus_size > 0 else 0
+        
+        # Compute IDF
+        for word, freq in self.df.items():
+            self.idf[word] = math.log((self.corpus_size - freq + 0.5) / (freq + 0.5) + 1.0)
+            
+    def tokenize(self, text):
+        return re.findall(r'\b\w+\b', text.lower())
+        
+    def search(self, query, limit=5):
+        query_words = self.tokenize(query)
+        scored_results = []
+        
+        for idx, doc in enumerate(self.docs):
+            score = 0.0
+            doc_len = self.doc_lengths[idx]
+            freqs = self.doc_freqs[idx]
+            
+            for word in query_words:
+                if word in self.idf:
+                    word_freq = freqs.get(word, 0)
+                    num = word_freq * (self.k1 + 1)
+                    den = word_freq + self.k1 * (1 - self.b + self.b * (doc_len / self.avg_doc_len))
+                    score += self.idf[word] * (num / den)
+                    
+            if score > 0:
+                scored_results.append((score, doc))
+                
+        # Sort by score descending
+        scored_results.sort(key=lambda x: x[0], reverse=True)
+        
+        results = []
+        for score, doc in scored_results[:limit]:
+            results.append({
+                "score": float(score),
+                "score_type": "BM25 Relevance",
+                "payload": {
+                    "text": doc["text"],
+                    "metadata-page_number": doc["page"]
+                }
+            })
+        return results
 
 # Groq configuration (supplied by user)
 def load_env_file():
@@ -44,38 +130,6 @@ def make_post_request(url, headers, payload):
                 pass
         return None
 
-def get_openai_embedding(text, openai_key):
-    url = "https://api.openai.com/v1/embeddings"
-    headers = {
-        "Authorization": f"Bearer {openai_key}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "input": text,
-        "model": "text-embedding-3-large"
-    }
-    resp = make_post_request(url, headers, payload)
-    if resp and 'data' in resp:
-        return resp['data'][0]['embedding']
-    return None
-
-def search_qdrant(vector, limit=4):
-    url = f"{QDRANT_URL}/collections/{COLLECTION_NAME}/points/search"
-    headers = {
-        "api-key": QDRANT_API_KEY,
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "vector": vector,
-        "limit": limit,
-        "with_payload": True,
-        "with_vector": False
-    }
-    resp = make_post_request(url, headers, payload)
-    if resp and 'result' in resp:
-        return resp['result']
-    return []
-
 def call_groq_llm(system_prompt, user_prompt):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
@@ -98,23 +152,19 @@ def call_groq_llm(system_prompt, user_prompt):
 def main():
     print("=" * 60)
     print("      VETIFI - AGENTIC RETRIEVAL & REASONING (RAG)")
+    print("      (PURELY OFFLINE BM25 LOCAL DATABASE SEARCH)")
     print("=" * 60)
     
-    # Try reading OpenAI key from environment or env_vars
-    openai_key = env_vars.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
-    if not openai_key:
-        print("\nYour Qdrant embeddings are 3,072 dimensions, which requires OpenAI's 'text-embedding-3-large'.")
-        openai_key = input("Please enter your OpenAI API Key: ").strip()
-        if not openai_key:
-            print("OpenAI key is required to embed text queries. Exiting.")
-            return
-
-        # Create/Update .env for persistence
-        with open(".env", "w", encoding="utf-8") as f:
-            f.write(f"GROQ_API_KEY={GROQ_API_KEY}\n")
-            f.write(f"OPENAI_API_KEY={openai_key}\n")
-    
-    print("\nEnvironment configured! You can now search your Merck Veterinary Manual database.")
+    print("\nLoading local database 'qdrant_export-2.json'...")
+    docs = load_local_data()
+    if not docs:
+        print("Error: Could not load local database. Exiting.")
+        return
+        
+    print(f"Loaded {len(docs)} documents successfully.")
+    print("Initializing BM25 Search Engine...")
+    bm25_index = BM25SearchEngine(docs)
+    print("Ready!")
     
     while True:
         try:
@@ -122,17 +172,11 @@ def main():
             if not query or query.lower() == 'exit':
                 break
             
-            print(f"\n[1/3] Generating 3072-dimensional embedding using text-embedding-3-large...")
-            query_vector = get_openai_embedding(query, openai_key)
-            if not query_vector:
-                print("Error: Failed to generate query embedding. Check your OpenAI API key.")
-                continue
-                
-            print(f"[2/3] Searching Qdrant collection '{COLLECTION_NAME}'...")
-            hits = search_qdrant(query_vector, limit=3)
+            print(f"\n[1/2] Searching local database using BM25...")
+            hits = bm25_index.search(query, limit=3)
             
             if not hits:
-                print("No relevant context found in Qdrant.")
+                print("No relevant context found in database.")
                 continue
             
             print(f"      Found {len(hits)} relevant source chunks:")
@@ -141,15 +185,14 @@ def main():
                 score = hit.get('score', 0)
                 payload = hit.get('payload', {})
                 text = payload.get('text', '')
-                doc_name = payload.get('metadata-filename', 'Manual')
                 page_num = payload.get('metadata-page_number', 'N/A')
                 
-                print(f"      - [{idx+1}] Score: {score:.4f} | {doc_name} (Page {page_num})")
-                context_blocks.append(f"Source Chunk [{idx+1}]:\nDocument: {doc_name} (Page {page_num})\nContent: {text}\n")
+                print(f"      - [{idx+1}] Relevance Score: {score:.4f} | Page {page_num}")
+                context_blocks.append(f"Source Chunk [{idx+1}]:\nPage: {page_num}\nContent: {text}\n")
             
             context_str = "\n---\n".join(context_blocks)
             
-            print(f"[3/3] Sending context to Groq ({GROQ_MODEL}) for clinical reasoning...")
+            print(f"[2/2] Sending context to Groq ({GROQ_MODEL}) for clinical reasoning...")
             system_prompt = (
                 "You are an expert veterinary assistant. You are provided with verified, exact excerpts "
                 "from the Merck Veterinary Manual. Answer the user's clinical question using ONLY the provided "

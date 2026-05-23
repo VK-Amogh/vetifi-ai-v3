@@ -111,7 +111,6 @@ def get_secret(key_name, default=""):
 DEFAULT_GROQ_KEY = "gsk_" + "zccJ3XqY2S6YVRkJSdS3WGdyb3FYJtUsTBHEhV80xnoRyEebOFlE"
 
 env_groq_key = get_secret("GROQ_API_KEY", DEFAULT_GROQ_KEY)
-env_openai_key = get_secret("OPENAI_API_KEY", "")
 
 # -----------------------------------------------------------------------------
 # Local Data Loading (Preserving Vectors for Semantic Search)
@@ -213,61 +212,7 @@ class BM25SearchEngine:
 def get_bm25_index(_docs):
     return BM25SearchEngine(_docs)
 
-def dot_product(v1, v2):
-    return sum(x * y for x, y in zip(v1, v2))
-
-def norm(v):
-    return sum(x * x for x in v) ** 0.5
-
-def cosine_similarity(v1, v2):
-    n1 = norm(v1)
-    n2 = norm(v2)
-    if n1 == 0 or n2 == 0:
-        return 0.0
-    return dot_product(v1, v2) / (n1 * n2)
-
-def get_openai_embedding(text, openai_key):
-    url = "https://api.openai.com/v1/embeddings"
-    headers = {
-        "Authorization": f"Bearer {openai_key}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "input": text,
-        "model": "text-embedding-3-large"
-    }
-    resp = make_post_request(url, headers, payload)
-    if resp and 'data' in resp:
-        return resp['data'][0]['embedding']
-    return None
-
-def search_local_vector(query, docs, openai_key, limit=5):
-    query_vector = get_openai_embedding(query, openai_key)
-    if not query_vector:
-        st.warning("Failed to generate query embedding. Falling back to offline BM25 search.")
-        bm25_index = get_bm25_index(docs)
-        return bm25_index.search(query, limit)
-        
-    scored_docs = []
-    for doc in docs:
-        if doc.get('vector'):
-            sim = cosine_similarity(query_vector, doc['vector'])
-            scored_docs.append((sim, doc))
-            
-    scored_docs.sort(key=lambda x: x[0], reverse=True)
-    results = []
-    for sim, doc in scored_docs[:limit]:
-        results.append({
-            "score": float(sim),
-            "score_type": "Cosine Similarity",
-            "payload": {
-                "text": doc["text"],
-                "metadata-page_number": doc["page"]
-            }
-        })
-    return results
-
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------
 # Core API Functions
 # -----------------------------------------------------------------------------
 def make_post_request(url, headers, payload):
@@ -345,18 +290,8 @@ with st.sidebar:
             st.success("Groq Key saved to .env!")
             st.rerun()
             
-        openai_key_input = st.text_input("OpenAI API Key (Optional for Semantic Vector Search)", value=env_openai_key, type="password")
-        if openai_key_input and openai_key_input != env_openai_key:
-            save_env_file("OPENAI_API_KEY", openai_key_input)
-            st.success("OpenAI Key saved to .env!")
-            st.rerun()
-            
     st.divider()
-    
-    if env_openai_key:
-        st.success("🎯 Semantic Vector Search Active")
-    else:
-        st.success("⚡ Offline BM25 Search Active (0 API Cost)")
+    st.success("⚡ Offline BM25 Search Active (0 API Cost)")
         
     st.divider()
     st.metric(label="Current Follow-up Count", value=f"{st.session_state.followup_count} / 6")
@@ -404,10 +339,7 @@ if prompt := st.chat_input("Enter clinical presentation or answer clarifying que
         
     with st.chat_message("assistant"):
         with st.spinner("Searching local database for relevant chunks..."):
-            if env_openai_key:
-                hits = search_local_vector(prompt, docs, env_openai_key, limit=5)
-            else:
-                hits = bm25_index.search(prompt, limit=5)
+            hits = bm25_index.search(prompt, limit=5)
             
         retrieved_chunks = []
         source_data = []
