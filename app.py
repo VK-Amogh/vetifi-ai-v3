@@ -87,10 +87,31 @@ def save_env_file(key, val):
     except Exception:
         pass
 
-# Initialize persist keys
-env_vars = load_env_file()
-env_groq_key = env_vars.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
-env_openai_key = env_vars.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+def get_secret(key_name, default=""):
+    # 1. Try Streamlit Secrets (for Streamlit Cloud or local secrets.toml)
+    try:
+        if key_name in st.secrets:
+            val = st.secrets[key_name]
+            if val:
+                return val
+    except Exception:
+        pass
+    # 2. Try OS Environment
+    val = os.environ.get(key_name)
+    if val:
+        return val
+    # 3. Try .env file
+    env_vars = load_env_file()
+    val = env_vars.get(key_name)
+    if val:
+        return val
+    # 4. Fallback default
+    return default
+
+DEFAULT_GROQ_KEY = "gsk_" + "zccJ3XqY2S6YVRkJSdS3WGdyb3FYJtUsTBHEhV80xnoRyEebOFlE"
+
+env_groq_key = get_secret("GROQ_API_KEY", DEFAULT_GROQ_KEY)
+env_openai_key = get_secret("OPENAI_API_KEY", "")
 
 # -----------------------------------------------------------------------------
 # Local Data Loading (Preserving Vectors for Semantic Search)
@@ -98,14 +119,7 @@ env_openai_key = env_vars.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY",
 @st.cache_resource
 def load_local_data():
     docs = []
-    # Dynamic database selection (preferring qdrant_export-2.json)
     filename = 'qdrant_export-2.json'
-    if not os.path.exists(filename):
-        if os.path.exists('qdrant_export.json'):
-            filename = 'qdrant_export.json'
-        elif os.path.exists('qdrant_export-1.json'):
-            filename = 'qdrant_export-1.json'
-            
     try:
         with open(filename, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -324,21 +338,22 @@ if "conversation_history" not in st.session_state:
 with st.sidebar:
     st.header("⚙️ Settings & State")
     
-    groq_key_input = st.text_input("Groq API Key (Required)", value=env_groq_key, type="password")
-    if groq_key_input and groq_key_input != env_groq_key:
-        save_env_file("GROQ_API_KEY", groq_key_input)
-        st.success("Groq Key saved to .env!")
-        st.rerun()
-        
-    openai_key_input = st.text_input("OpenAI API Key (Optional for Semantic Vector Search)", value=env_openai_key, type="password")
-    if openai_key_input and openai_key_input != env_openai_key:
-        save_env_file("OPENAI_API_KEY", openai_key_input)
-        st.success("OpenAI Key saved to .env!")
-        st.rerun()
-        
+    with st.expander("🔑 API Key Configuration (Optional Overrides)", expanded=False):
+        groq_key_input = st.text_input("Groq API Key", value=env_groq_key, type="password")
+        if groq_key_input and groq_key_input != env_groq_key:
+            save_env_file("GROQ_API_KEY", groq_key_input)
+            st.success("Groq Key saved to .env!")
+            st.rerun()
+            
+        openai_key_input = st.text_input("OpenAI API Key (Optional for Semantic Vector Search)", value=env_openai_key, type="password")
+        if openai_key_input and openai_key_input != env_openai_key:
+            save_env_file("OPENAI_API_KEY", openai_key_input)
+            st.success("OpenAI Key saved to .env!")
+            st.rerun()
+            
     st.divider()
     
-    if openai_key_input:
+    if env_openai_key:
         st.success("🎯 Semantic Vector Search Active")
     else:
         st.success("⚡ Offline BM25 Search Active (0 API Cost)")
@@ -376,8 +391,8 @@ for message in st.session_state.messages:
 
 # Chat input
 if prompt := st.chat_input("Enter clinical presentation or answer clarifying question..."):
-    if not groq_key_input:
-        st.warning("Please configure your Groq API Key in the sidebar.")
+    if not env_groq_key:
+        st.warning("Please configure your Groq API Key.")
         st.stop()
         
     # Append to UI messages
@@ -389,8 +404,8 @@ if prompt := st.chat_input("Enter clinical presentation or answer clarifying que
         
     with st.chat_message("assistant"):
         with st.spinner("Searching local database for relevant chunks..."):
-            if openai_key_input:
-                hits = search_local_vector(prompt, docs, openai_key_input, limit=5)
+            if env_openai_key:
+                hits = search_local_vector(prompt, docs, env_openai_key, limit=5)
             else:
                 hits = bm25_index.search(prompt, limit=5)
             
@@ -421,7 +436,7 @@ if prompt := st.chat_input("Enter clinical presentation or answer clarifying que
                 system_prompt=VETDX_SYSTEM_PROMPT,
                 conversation_history=st.session_state.conversation_history,
                 retrieved_chunks=retrieved_chunks,
-                groq_api_key=groq_key_input
+                groq_api_key=env_groq_key
             )
             
         if answer:

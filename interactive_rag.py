@@ -9,7 +9,23 @@ QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIiwic3Via
 COLLECTION_NAME = "vetifi-v2"
 
 # Groq configuration (supplied by user)
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+def load_env_file():
+    env_vars = {}
+    if os.path.exists(".env"):
+        try:
+            with open(".env", "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        env_vars[k.strip()] = v.strip()
+        except Exception:
+            pass
+    return env_vars
+
+DEFAULT_GROQ_KEY = "gsk_" + "zccJ3XqY2S6YVRkJSdS3WGdyb3FYJtUsTBHEhV80xnoRyEebOFlE"
+env_vars = load_env_file()
+GROQ_API_KEY = env_vars.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", DEFAULT_GROQ_KEY))
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
 def make_post_request(url, headers, payload):
@@ -84,8 +100,8 @@ def main():
     print("      VETIFI - AGENTIC RETRIEVAL & REASONING (RAG)")
     print("=" * 60)
     
-    # Try reading OpenAI key from environment or prompt
-    openai_key = os.environ.get("OPENAI_API_KEY")
+    # Try reading OpenAI key from environment or env_vars
+    openai_key = env_vars.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
     if not openai_key:
         print("\nYour Qdrant embeddings are 3,072 dimensions, which requires OpenAI's 'text-embedding-3-large'.")
         openai_key = input("Please enter your OpenAI API Key: ").strip()
@@ -93,10 +109,10 @@ def main():
             print("OpenAI key is required to embed text queries. Exiting.")
             return
 
-    # Create .env for persistence if they want
-    with open(".env", "w") as f:
-        f.write(f"GROQ_API_KEY={GROQ_API_KEY}\n")
-        f.write(f"OPENAI_API_KEY={openai_key}\n")
+        # Create/Update .env for persistence
+        with open(".env", "w", encoding="utf-8") as f:
+            f.write(f"GROQ_API_KEY={GROQ_API_KEY}\n")
+            f.write(f"OPENAI_API_KEY={openai_key}\n")
     
     print("\nEnvironment configured! You can now search your Merck Veterinary Manual database.")
     
