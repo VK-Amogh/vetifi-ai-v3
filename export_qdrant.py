@@ -1,17 +1,18 @@
+import os
 import urllib.request
 import json
 import ssl
 import time
 
 QDRANT_URL = "https://45de9526-9acf-44cf-919a-6ba8557d978d.australia-southeast1-0.gcp.cloud.qdrant.io:6333"
-QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIiwic3ViamVjdCI6ImFwaS1rZXk6MGYzMzVlYjEtMDAwZi00NmNiLThhZDYtMDBhNzE1NjczNGIyIn0.JoHi-ugk1JiPPja9E7AtkTVwB-rr5ZE9qV7-AqC3FNs"
+QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY", "")
 COLLECTION_NAME = "vetifi-v2"
 
 def make_post_request(url, headers, payload):
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        ctx = ssl._create_unverified_context()
+        ctx = ssl.create_default_context()
         with urllib.request.urlopen(req, context=ctx) as response:
             return json.loads(response.read().decode('utf-8'))
     except Exception as e:

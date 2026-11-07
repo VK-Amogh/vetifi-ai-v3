@@ -108,7 +108,7 @@ def get_secret(key_name, default=""):
     # 4. Fallback default
     return default
 
-DEFAULT_GROQ_KEY = "gsk_" + "zccJ3XqY2S6YVRkJSdS3WGdyb3FYJtUsTBHEhV80xnoRyEebOFlE"
+DEFAULT_GROQ_KEY = ""
 
 env_groq_key = get_secret("GROQ_API_KEY", DEFAULT_GROQ_KEY)
 
@@ -221,7 +221,7 @@ def make_post_request(url, headers, payload):
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        ctx = ssl._create_unverified_context()
+        ctx = ssl.create_default_context()
         with urllib.request.urlopen(req, context=ctx) as response:
             return json.loads(response.read().decode('utf-8'))
     except Exception as e:
@@ -282,13 +282,7 @@ if "conversation_history" not in st.session_state:
 
 with st.sidebar:
     st.header("⚙️ Settings & State")
-    
-    with st.expander("🔑 API Key Configuration (Optional Overrides)", expanded=False):
-        groq_key_input = st.text_input("Groq API Key", value=env_groq_key, type="password")
-        if groq_key_input and groq_key_input != env_groq_key:
-            save_env_file("GROQ_API_KEY", groq_key_input)
-            st.success("Groq Key saved to .env!")
-            st.rerun()
+    st.caption("AI reasoning is configured by the server administrator. Local retrieval works without an API key.")
             
     st.divider()
     st.success("⚡ Offline BM25 Search Active (0 API Cost)")
@@ -326,10 +320,6 @@ for message in st.session_state.messages:
 
 # Chat input
 if prompt := st.chat_input("Enter clinical presentation or answer clarifying question..."):
-    if not env_groq_key:
-        st.warning("Please configure your Groq API Key.")
-        st.stop()
-        
     # Append to UI messages
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.session_state.conversation_history.append({"role": "user", "content": prompt})
@@ -363,13 +353,16 @@ if prompt := st.chat_input("Enter clinical presentation or answer clarifying que
                     "score_type": score_type
                 })
         
-        with st.spinner("Analyzing differential and diagnostic path..."):
-            answer = call_groq_llm(
-                system_prompt=VETDX_SYSTEM_PROMPT,
-                conversation_history=st.session_state.conversation_history,
-                retrieved_chunks=retrieved_chunks,
-                groq_api_key=env_groq_key
-            )
+        if env_groq_key:
+            with st.spinner("Analyzing differential and diagnostic path..."):
+                answer = call_groq_llm(
+                    system_prompt=VETDX_SYSTEM_PROMPT,
+                    conversation_history=st.session_state.conversation_history,
+                    retrieved_chunks=retrieved_chunks,
+                    groq_api_key=env_groq_key
+                )
+        else:
+            answer = "Offline retrieval is active. Review the source passages below. AI reasoning requires a server-configured GROQ_API_KEY."
             
         if answer:
             st.markdown(answer)
@@ -388,7 +381,7 @@ if prompt := st.chat_input("Enter clinical presentation or answer clarifying que
                         
             # State Management: Check if it's a clarifying question or final diagnosis.
             # If the response does not contain the final diagnosis heading, count it as a follow-up question.
-            if "MOST LIKELY DIAGNOSIS" not in answer.upper():
+            if env_groq_key and "MOST LIKELY DIAGNOSIS" not in answer.upper():
                 st.session_state.followup_count += 1
                 
             st.session_state.messages.append({

@@ -109,7 +109,7 @@ def load_env_file():
             pass
     return env_vars
 
-DEFAULT_GROQ_KEY = "gsk_" + "zccJ3XqY2S6YVRkJSdS3WGdyb3FYJtUsTBHEhV80xnoRyEebOFlE"
+DEFAULT_GROQ_KEY = ""
 env_vars = load_env_file()
 GROQ_API_KEY = env_vars.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", DEFAULT_GROQ_KEY))
 GROQ_MODEL = "llama-3.3-70b-versatile"
@@ -118,7 +118,7 @@ def make_post_request(url, headers, payload):
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        ctx = ssl._create_unverified_context()
+        ctx = ssl.create_default_context()
         with urllib.request.urlopen(req, context=ctx) as response:
             return json.loads(response.read().decode('utf-8'))
     except Exception as e:
@@ -191,6 +191,9 @@ def main():
                 context_blocks.append(f"Source Chunk [{idx+1}]:\nPage: {page_num}\nContent: {text}\n")
             
             context_str = "\n---\n".join(context_blocks)
+            if not GROQ_API_KEY:
+                print("Offline retrieval complete. Set GROQ_API_KEY to enable AI reasoning.")
+                continue
             
             print(f"[2/2] Sending context to Groq ({GROQ_MODEL}) for clinical reasoning...")
             system_prompt = (
